@@ -69,7 +69,8 @@ Systemd does a lot of useful lifting here:
  - Set user to run as
  - Grant the CAP_NET_BIND_SERVICE capabality to allow it to bind to ports <1024
  - Security hardening
- - /etc/systemd/system/docker-ident.service is as per the following
+ 
+/etc/systemd/system/docker-ident.service is as per the following
 
     [Unit]
     Description=Docker Ident Service
