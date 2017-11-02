@@ -1,0 +1,37 @@
+[Unit]
+Description=Docker Ident Service
+After=network.target
+Wants=docker.service
+ 
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/docker-identd
+Restart=on-failure
+RestartSec=43s
+ 
+User=docker-identd
+# Needed to inspect docker
+Group=docker
+# Needed to read /proc/net/nf_conntrack
+SupplementaryGroups=root
+ 
+# Strict would be preferred, but not available in RHEL 7.4
+ProtectSystem=full
+PrivateDevices=true
+PrivateTmp=true
+ReadOnlyDirectories=/
+ 
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ 
+Nice=12
+ 
+StandardOutput=syslog
+StandardError=syslog
+SyslogFacility=daemon
+SyslogIdentifier=docker-identd
+SyslogLevel=info
+ 
+[Install]
+WantedBy=multi-user.target
