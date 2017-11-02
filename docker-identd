@@ -1,0 +1,130 @@
+#!/usr/bin/python2.7
+#
+# Problem statement: you have a dockerized environment in your network; you
+# limit outgoing traffic from your servers using a whitelisted proxy
+# configuration (Squid). You wish to allow some containers access to some
+# sites; perhaps even allow some containers access to any site.
+#
+# How then, can you grant access based on the container? You could set up
+# user-credentials for each container that needs access, but that is an
+# administrative burden, and further a lot of software doesn't work well
+# with a proxy that needs user authentication, which is a support concern.
+#
+# Squid can use ident lookups to determine the 'user', which can then be
+# used to evaluate ACL conditions. To do that, we would need to set up
+# some specialised 'identd' type service on our docker host(s) that was
+# able to return the container name associated with a given source-dest
+# TCP port pair.
+#
+# This program implements the identd lookup machinery.
+#
+# NAT is involved, so when the ident client (Squid) sends a request, we could
+# query /proc/net/nf_conntrack to see which internal (Docker) IP it is
+# associated with.
+#
+# We could then inspect Docker for IP.
+#
+# This is an identd service, so it could be queried quite frequently. We should have
+# something that stays around and caches data for a little so as not to spent too
+# much processing effort.
+ 
+import SocketServer
+import re
+import subprocess
+ 
+class DockerIdentServer(SocketServer.StreamRequestHandler):
+ 
+    def handle(self):
+        try:
+            self.data = self.rfile.readline().strip()
+ 
+            source_port_to_query, dest_port_to_query = [ int(x.strip()) for x in self.data.split(',') ]
+            dest_ip_to_query = self.client_address[0]
+ 
+            source_ip = self.complete_source_ip(
+                    dst=self.translate_ip(dest_ip_to_query),
+                    sport=source_port_to_query,
+                    dport=dest_port_to_query)
+ 
+            container_details = self.docker_container_using_ip(source_ip)
+ 
+            if container_details is None:
+                self.wfile.write('{}, {} : ERROR : NO-USER\r\n'.format(source_port_to_query, dest_port_to_query))
+            else:
+                self.wfile.write('{}, {} : USERID : UNIX : {}\r\n'.format(source_port_to_query, dest_port_to_query, container_details['name']))
+        except:
+            self.wfile.write('{}, {} : ERROR : UNKNOWN-ERROR\r\n'.format(source_port_to_query, dest_port_to_query))
+            raise
+ 
+ 
+    def translate_ip(self, ip):
+    """Return either the same IP, or a replaced one according to a hardcoded lookup.
+ 
+    Use-case: you connect to a load-balanced address, and the ident lookup comes from
+    the member-server."""
+ 
+    if ip == "M.M.M.M":   # member-server
+            return "V.V.V.V"  # VIP we've actually connected to
+    return ip
+ 
+ 
+    # TODO: make this cached
+    def container_lookup_by_ip(self):
+        # This is not as easy as it ought to be, because Docker seems to have
+        # no facility in 'docker ps' to include IP (and have parseable output)
+ 
+        container_ip_data = [ l.split('|') for l in subprocess.check_output(
+            "docker ps -q | xargs docker inspect --format '{{ .Id }}|{{ .Name }}|{{ .NetworkSettings.IPAddress }}'",
+            shell=True).split('\n') if l != '' ]
+ 
+        output = {}
+ 
+        for [container_id, container_name, container_ip] in container_ip_data:
+            if container_ip == '':
+                continue
+            output[container_ip] = {}
+            output[container_ip]['id'] = container_id
+            output[container_ip]['name'] = container_name[1:]
+ 
+        return output
+ 
+ 
+    def docker_container_using_ip(self, ip):
+        """Get key container details belonging to given IP
+ 
+        Returns either None of a dictionary with at least 'id' and 'name' elements """
+ 
+        lookup = self.container_lookup_by_ip()
+        if ip in lookup:
+            return lookup[ip]
+        else:
+            return None
+ 
+ 
+    def complete_source_ip(self, dst=None, sport=None, dport=None):
+        pattern = r'ipv4 +2 +tcp +6 [0-9]+ ESTABLISHED src=(?P<source_ip>[0-9.]+) dst={dst} sport={sport} dport={dport} .* \[ASSURED\] '.format(
+                dst=re.escape(dst),
+                sport=sport,
+                dport=dport )
+ 
+        compiled = re.compile(pattern)
+ 
+        with open('/proc/net/nf_conntrack', 'r') as ct:
+            for ctd in ct.readlines():
+                matches = compiled.match(ctd)
+                if matches is None:
+                    continue
+                return matches.group('source_ip')
+ 
+# We don't require using port 113 ourselves, but ident clients do.  For
+# ourserves, we just need to be in the 'docker' group so we have access to
+# unix:///var/run/docker.sock
+ 
+if __name__ == "__main__":
+    HOST, PORT = '0.0.0.0', 113
+ 
+    server = SocketServer.TCPServer((HOST,PORT), DockerIdentServer, bind_and_activate=False)
+    server.allow_reuse_address = True
+    server.server_bind()
+    server.server_activate()
+    server.serve_forever()
